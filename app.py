@@ -53,16 +53,16 @@ def apply_gain(audio, gain_db):
     return librosa.istft(S_adjusted, hop_length=HOP_LENGTH)
 
 # ===== Streamlit GUI =====
-st.title("イコライザー補正 Webアプリ")
+st.title("イコライザー比較・適用APP")
 
-tab = st.tabs(["EQ作成 & 再生", "EQ適用 & 再生"])
+tab = st.tabs(["EQ比較 & 再生", "EQ適用 & 再生"])
 
 with tab[0]:
-    st.header("EQ作成 & 再生")
+    st.header("EQ比較 & 再生")
     target_file = st.file_uploader("録音ファイル", type=["wav", "mp3"])
     ref_file = st.file_uploader("音源ファイル", type=["wav", "mp3"])
     
-    if st.button("EQ作成"):
+    if st.button("EQ比較"):
         if target_file is None or ref_file is None:
             st.error("ファイルをアップロードしてください")
         else:
