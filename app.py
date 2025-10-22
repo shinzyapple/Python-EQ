@@ -89,9 +89,18 @@ with tab[0]:
             for i, g in enumerate(gain_db):
                 st.text(f"{FREQS[i]} Hz: {int(round(g)):+d} dB")
             
-            # EQファイルも保存可能
-            np.save("eq_gain.npy", gain_db)
-            st.download_button("EQファイルをダウンロード", "eq_gain.npy")
+            # EQファイルをバイト形式で渡す
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".npy") as tf_eq:
+                np.save(tf_eq.name, gain_db)
+                tf_eq.seek(0)
+                with open(tf_eq.name, "rb") as f:
+                    eq_bytes = f.read()
+            st.download_button(
+                label="EQファイルをダウンロード",
+                data=eq_bytes,
+                file_name="eq_gain.npy",
+                mime="application/octet-stream"
+            )
 
 with tab[1]:
     st.header("EQ適用 & 再生")
@@ -106,7 +115,7 @@ with tab[1]:
             with tempfile.NamedTemporaryFile(delete=False) as tf_input:
                 tf_input.write(input_file.read())
                 path_input = tf_input.name
-            with tempfile.NamedTemporaryFile(delete=False) as tf_gain:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".npy") as tf_gain:
                 tf_gain.write(gain_file.read())
                 path_gain = tf_gain.name
             
