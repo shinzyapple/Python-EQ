@@ -89,10 +89,9 @@ with tab[0]:
             for i, g in enumerate(gain_db):
                 st.text(f"{FREQS[i]} Hz: {int(round(g)):+d} dB")
             
-            # EQファイルをバイト形式で渡す
+            # EQファイルをバイナリで渡す
             with tempfile.NamedTemporaryFile(delete=False, suffix=".npy") as tf_eq:
                 np.save(tf_eq.name, gain_db)
-                tf_eq.seek(0)
                 with open(tf_eq.name, "rb") as f:
                     eq_bytes = f.read()
             st.download_button(
@@ -127,4 +126,9 @@ with tab[1]:
             sf.write(out_path, adjusted, TARGET_SR)
             st.success("EQ適用完了！")
             st.audio(out_path)
-            st.download_button("補正音声をダウンロード", out_path)
+            st.download_button(
+                label="補正音声をダウンロード",
+                data=open(out_path, "rb").read(),
+                file_name="adjusted_apply.wav",
+                mime="audio/wav"
+            )
