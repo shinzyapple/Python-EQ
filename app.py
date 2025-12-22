@@ -4,7 +4,6 @@ import librosa
 import soundfile as sf
 import json
 import os
-import tempfile
 
 # ===== パラメータ =====
 TARGET_SR = 44100
@@ -43,7 +42,11 @@ def analyze_spatial(y, sr):
     decay = np.polyfit(t, np.log(rms + 1e-6), 1)[0]
 
     max_e = np.max(rms)
-    rt60 = t[np.where(rms < max_e * 1e-3)[0][0]] if np.any(rms < max_e * 1e-3) else t[-1]
+    rt60 = (
+        t[np.where(rms < max_e * 1e-3)[0][0]]
+        if np.any(rms < max_e * 1e-3)
+        else t[-1]
+    )
 
     return {
         "direct": normalize(direct, 0, 0.1),
@@ -52,19 +55,25 @@ def analyze_spatial(y, sr):
         "decay": normalize(decay, -10, 0),
     }
 
-# ===== EQ =====
+# ===== EQ解析 =====
 def compute_gain(target, ref):
     S_t = np.abs(librosa.stft(target, n_fft=N_FFT, hop_length=HOP_LENGTH))
     S_r = np.abs(librosa.stft(ref, n_fft=N_FFT, hop_length=HOP_LENGTH))
-    freqs = np.linspace(0, TARGET_SR/2, S_t.shape[0])
+    freqs = np.linspace(0, TARGET_SR / 2, S_t.shape[0])
 
     gain = []
     for f in FREQS:
-        low, high = f / (2**(1/6)), f * (2**(1/6))
+        low, high = f / (2 ** (1 / 6)), f * (2 ** (1 / 6))
         idx = np.where((freqs >= low) & (freqs <= high))[0]
+        if len(idx) == 0:
+            gain.append(0.0)
+            continue
+
         g = np.mean(S_t[idx]) / (np.mean(S_r[idx]) + 1e-8)
-        gain.append(np.clip(20 * np.log10(g + 1e-8), -MAX_GAIN, MAX_GAIN))
-    return np.array(gain)
+        g_db = 20 * np.log10(g + 1e-8)
+        gain.append(float(np.clip(g_db, -MAX_GAIN, MAX_GAIN)))
+
+    return np.array(gain, dtype=float)
 
 # ===== UI =====
 st.set_page_config(page_title="音響プリセット生成ツール", layout="centered")
@@ -90,7 +99,8 @@ if rec and ref and st.button("解析してプリセット生成"):
 
     st.markdown("## 🎚 EQ 推奨設定")
     for f, g in zip(FREQS, eq_gain):
-        st.text(f"{f:>6} Hz : {int(round(g)):+d} dB")
+        # ★ ここが修正ポイント（安全なfloat表示）
+        st.text(f"{f:>6} Hz : {g:+.1f} dB")
 
     st.markdown("## 🌌 リバーブ 推奨設定")
     st.text(f"原音        : {spatial_diff['direct']:+}")
