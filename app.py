@@ -23,10 +23,11 @@ FREQS = [
 ]
 
 # =====================
-# 共通ユーティリティ
+# 共通量子化
 # =====================
-def q01(x):
-    return round(np.clip(x, 0.0, 1.0) / STEP) * STEP
+def quantize(x, max_val):
+    x = np.clip(x, 0.0, max_val)
+    return round(x / STEP) * STEP
 
 # =====================
 # EQ解析
@@ -55,10 +56,10 @@ def compute_gain(audio_target, audio_ref):
     return np.array(gain_db)
 
 # =====================
-# リバーブ解析
+# リバーブ & ステレオ解析
 # =====================
-def analyze_reverb(y, sr):
-    rms = librosa.feature.rms(y=y)[0]
+def analyze_spatial(y_mono, y_stereo, sr):
+    rms = librosa.feature.rms(y=y_mono)[0]
     times = librosa.frames_to_time(np.arange(len(rms)), sr=sr)
 
     # ---- 原音 / 残響 ----
@@ -67,10 +68,9 @@ def analyze_reverb(y, sr):
 
     e = np.mean(early)
     l = np.mean(late)
-    total = e + l + 1e-9
 
-    direct = q01(e / total)
-    reverb = q01(l / total)
+    direct = quantize(e / (e + l + 1e-9), 1.0)
+    reverb = quantize((l / (e + 1e-9)) * 3.0, 3.0)
 
     # ---- 部屋の広さ（RT60）----
     rms_db = 20 * np.log10(rms + 1e-6)
@@ -81,26 +81,33 @@ def analyze_reverb(y, sr):
     except IndexError:
         rt60 = times[-1]
 
-    room_size = q01(rt60 / 3.0)
+    room_size = quantize(rt60 / 3.0, 1.0)
 
     # ---- 減衰 ----
     valid = rms_db > peak - 60
     slope, _ = np.polyfit(times[valid], rms_db[valid], 1)
-    decay = q01((-slope - 5) / 35)
+    decay = quantize((-slope - 5) / 35, 1.0)
+
+    # ---- ステレオ度合い ----
+    if y_stereo.shape[0] == 2:
+        L, R = y_stereo
+        corr = np.corrcoef(L, R)[0, 1]
+        stereo = quantize(1.0 - abs(corr), 1.0)
+    else:
+        stereo = 0.0
 
     return {
         "direct": direct,
         "reverb": reverb,
         "room_size": room_size,
-        "decay": decay
+        "decay": decay,
+        "stereo": stereo
     }
 
 # =====================
 # Streamlit UI
 # =====================
-st.title("🎧 録音 → 音響プリセット抽出アプリ")
-
-st.markdown("### 音声ファイルをアップロード")
+st.title("🎧 録音 → 空間音響プリセット抽出")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -119,39 +126,35 @@ if st.button("解析する"):
             f2.write(ref_file.read())
             ref_path = f2.name
 
-        y_rec, _ = librosa.load(rec_path, sr=TARGET_SR, mono=True)
+        y_rec_mono, _ = librosa.load(rec_path, sr=TARGET_SR, mono=True)
+        y_rec_stereo, _ = librosa.load(rec_path, sr=TARGET_SR, mono=False)
         y_ref, _ = librosa.load(ref_path, sr=TARGET_SR, mono=True)
 
         # ---- 解析 ----
-        eq_gain = compute_gain(y_rec, y_ref)
-        reverb_params = analyze_reverb(y_rec, TARGET_SR)
+        eq_gain = compute_gain(y_rec_mono, y_ref)
+        spatial = analyze_spatial(y_rec_mono, y_rec_stereo, TARGET_SR)
 
-        # =====================
-        # 表示
-        # =====================
-        st.markdown("## 🎚 EQ補正値")
+        # ---- 表示 ----
+        st.markdown("## 🎚 EQ補正")
         for f, g in zip(FREQS, eq_gain):
             st.text(f"{f:>6} Hz : {g:+.1f} dB")
 
-        st.markdown("## 🏠 リバーブ特性（0.01刻み）")
-        st.text(f"原音        : {reverb_params['direct']:.2f}")
-        st.text(f"残響        : {reverb_params['reverb']:.2f}")
-        st.text(f"部屋の広さ  : {reverb_params['room_size']:.2f}")
-        st.text(f"減衰        : {reverb_params['decay']:.2f}")
+        st.markdown("## 🏠 空間パラメータ（0.01刻み）")
+        st.text(f"原音        : {spatial['direct']:.2f} / 1.00")
+        st.text(f"残響音      : {spatial['reverb']:.2f} / 3.00")
+        st.text(f"部屋の広さ  : {spatial['room_size']:.2f} / 1.00")
+        st.text(f"減衰        : {spatial['decay']:.2f} / 1.00")
+        st.text(f"ステレオ度合: {spatial['stereo']:.2f} / 1.00")
 
-        # =====================
-        # プリセット保存
-        # =====================
+        # ---- プリセット保存 ----
         preset = {
             "eq_gain_db": eq_gain.tolist(),
-            "reverb": reverb_params
+            "spatial": spatial
         }
 
-        preset_json = json.dumps(preset, indent=2, ensure_ascii=False)
-
         st.download_button(
-            "📥 プリセットとして保存",
-            data=preset_json,
+            "📥 プリセット保存",
+            data=json.dumps(preset, indent=2, ensure_ascii=False),
             file_name="audio_preset.json",
             mime="application/json"
         )
