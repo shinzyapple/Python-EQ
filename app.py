@@ -2,88 +2,156 @@ import streamlit as st
 import numpy as np
 import librosa
 import soundfile as sf
+import tempfile
 import json
-import os
 
-# ===== パラメータ =====
+# =====================
+# 基本設定
+# =====================
 TARGET_SR = 44100
 N_FFT = 1024
 HOP_LENGTH = 256
 MAX_GAIN = 30
-PRESET_DIR = "presets"
+STEP = 0.01
 
-if not os.path.exists(PRESET_DIR):
-    os.makedirs(PRESET_DIR)
+FREQS = [
+    20, 25, 31.5, 40, 50, 63, 80, 100,
+    125, 160, 200, 250, 315, 400, 500,
+    630, 800, 1000, 1250, 1600, 2000,
+    2500, 3150, 4000, 5000, 6300, 8000,
+    10000, 12500, 16000, 20000
+]
 
-# ===== 共通関数 =====
-def quantize_01(x):
-    """
-    0.00〜1.00 にクリップして 0.01 刻みに量子化
-    """
-    x = float(x)
-    x = np.clip(x, 0.0, 1.0)
-    return round(x / 0.01) * 0.01
+# =====================
+# 共通ユーティリティ
+# =====================
+def q01(x):
+    return round(np.clip(x, 0.0, 1.0) / STEP) * STEP
 
+# =====================
+# EQ解析
+# =====================
+def compute_gain(audio_target, audio_ref):
+    S_target = np.abs(librosa.stft(audio_target, n_fft=N_FFT, hop_length=HOP_LENGTH))
+    S_ref = np.abs(librosa.stft(audio_ref, n_fft=N_FFT, hop_length=HOP_LENGTH))
 
-# ===== UI =====
-st.title("🎧 リバーブ解析ツール")
+    freqs_stft = np.linspace(0, TARGET_SR / 2, S_target.shape[0])
+    gain_db = []
 
-uploaded = st.file_uploader("音声ファイルをアップロード", type=["wav", "mp3", "flac"])
+    for f in FREQS:
+        f_low = f / (2 ** (1/6))
+        f_high = f * (2 ** (1/6))
+        idx = np.where((freqs_stft >= f_low) & (freqs_stft <= f_high))[0]
 
-if uploaded is not None:
-    # ===== 音声読み込み =====
-    y, sr = librosa.load(uploaded, sr=TARGET_SR, mono=True)
+        if len(idx) == 0:
+            gain_db.append(0.0)
+            continue
 
-    # ===== スペクトル解析 =====
-    S = np.abs(librosa.stft(y, n_fft=N_FFT, hop_length=HOP_LENGTH))
-    S_db = librosa.amplitude_to_db(S, ref=np.max)
+        t = np.mean(S_target[idx, :])
+        r = np.mean(S_ref[idx, :])
+        g = 20 * np.log10((t + 1e-8) / (r + 1e-8))
+        gain_db.append(float(np.clip(g, -MAX_GAIN, MAX_GAIN)))
 
-    # ===== 原音・残響の推定 =====
-    # 前半を原音、後半を残響として扱う（簡易モデル）
-    mid = S_db.shape[1] // 2
-    dry_energy = np.mean(np.abs(S_db[:, :mid]))
-    wet_energy = np.mean(np.abs(S_db[:, mid:]))
+    return np.array(gain_db)
 
-    # 正規化（0〜1）
-    max_energy = max(dry_energy, wet_energy, 1e-9)
-    dry = quantize_01(dry_energy / max_energy)
-    wet = quantize_01(wet_energy / max_energy)
+# =====================
+# リバーブ解析
+# =====================
+def analyze_reverb(y, sr):
+    rms = librosa.feature.rms(y=y)[0]
+    times = librosa.frames_to_time(np.arange(len(rms)), sr=sr)
 
-    # ===== 空間差分 =====
-    spatial_diff = np.diff(S_db, axis=1)
+    # ---- 原音 / 残響 ----
+    early = rms[times < 0.08]
+    late = rms[times >= 0.08]
 
-    # ===== 部屋の広さ =====
-    # 差分の平均エネルギー → 空間の広がり
-    room_size_raw = np.mean(np.abs(spatial_diff))
-    room_size = quantize_01(room_size_raw / np.max(np.abs(S_db)))
+    e = np.mean(early)
+    l = np.mean(late)
+    total = e + l + 1e-9
 
-    # ===== 減衰 =====
-    # フレーム間変化量 → 残響の減り方
-    decay_raw = np.mean(np.abs(np.diff(spatial_diff)))
-    decay = quantize_01(decay_raw / np.max(np.abs(S_db)))
+    direct = q01(e / total)
+    reverb = q01(l / total)
 
-    # ===== 表示 =====
-    st.subheader("📊 解析結果")
-    st.text(f"原音        : {dry:.2f}")
-    st.text(f"残響        : {wet:.2f}")
-    st.text(f"部屋の広さ  : {room_size:.2f}")
-    st.text(f"減衰        : {decay:.2f}")
+    # ---- 部屋の広さ（RT60）----
+    rms_db = 20 * np.log10(rms + 1e-6)
+    peak = np.max(rms_db)
 
-    # ===== プリセット保存 =====
-    st.divider()
-    preset_name = st.text_input("💾 プリセット名", "my_room_preset")
+    try:
+        rt60 = times[np.where(rms_db < peak - 60)[0][0]]
+    except IndexError:
+        rt60 = times[-1]
 
-    if st.button("プリセット保存"):
+    room_size = q01(rt60 / 3.0)
+
+    # ---- 減衰 ----
+    valid = rms_db > peak - 60
+    slope, _ = np.polyfit(times[valid], rms_db[valid], 1)
+    decay = q01((-slope - 5) / 35)
+
+    return {
+        "direct": direct,
+        "reverb": reverb,
+        "room_size": room_size,
+        "decay": decay
+    }
+
+# =====================
+# Streamlit UI
+# =====================
+st.title("🎧 録音 → 音響プリセット抽出アプリ")
+
+st.markdown("### 音声ファイルをアップロード")
+
+col1, col2 = st.columns(2)
+with col1:
+    rec_file = st.file_uploader("🎙 録音ファイル", type=["wav", "mp3"])
+with col2:
+    ref_file = st.file_uploader("🎼 音源ファイル", type=["wav", "mp3"])
+
+if st.button("解析する"):
+    if rec_file is None or ref_file is None:
+        st.error("両方のファイルをアップロードしてね")
+    else:
+        with tempfile.NamedTemporaryFile(delete=False) as f1:
+            f1.write(rec_file.read())
+            rec_path = f1.name
+        with tempfile.NamedTemporaryFile(delete=False) as f2:
+            f2.write(ref_file.read())
+            ref_path = f2.name
+
+        y_rec, _ = librosa.load(rec_path, sr=TARGET_SR, mono=True)
+        y_ref, _ = librosa.load(ref_path, sr=TARGET_SR, mono=True)
+
+        # ---- 解析 ----
+        eq_gain = compute_gain(y_rec, y_ref)
+        reverb_params = analyze_reverb(y_rec, TARGET_SR)
+
+        # =====================
+        # 表示
+        # =====================
+        st.markdown("## 🎚 EQ補正値")
+        for f, g in zip(FREQS, eq_gain):
+            st.text(f"{f:>6} Hz : {g:+.1f} dB")
+
+        st.markdown("## 🏠 リバーブ特性（0.01刻み）")
+        st.text(f"原音        : {reverb_params['direct']:.2f}")
+        st.text(f"残響        : {reverb_params['reverb']:.2f}")
+        st.text(f"部屋の広さ  : {reverb_params['room_size']:.2f}")
+        st.text(f"減衰        : {reverb_params['decay']:.2f}")
+
+        # =====================
+        # プリセット保存
+        # =====================
         preset = {
-            "name": preset_name,
-            "dry": dry,
-            "wet": wet,
-            "room_size": room_size,
-            "decay": decay
+            "eq_gain_db": eq_gain.tolist(),
+            "reverb": reverb_params
         }
 
-        path = os.path.join(PRESET_DIR, preset_name + ".json")
-        with open(path, "w") as f:
-            json.dump(preset, f, indent=2, ensure_ascii=False)
+        preset_json = json.dumps(preset, indent=2, ensure_ascii=False)
 
-        st.success(f"プリセット保存完了：{path}")
+        st.download_button(
+            "📥 プリセットとして保存",
+            data=preset_json,
+            file_name="audio_preset.json",
+            mime="application/json"
+        )
